@@ -336,6 +336,7 @@ fn link_rlib<'a, B: ArchiveBuilder<'a>>(
             | NativeLibKind::Dylib { .. }
             | NativeLibKind::Framework { .. }
             | NativeLibKind::RawDylib
+            | NativeLibKind::LinkArg
             | NativeLibKind::Unspecified => continue,
         }
         if let Some(name) = lib.name {
@@ -1287,6 +1288,7 @@ fn print_native_static_libs(sess: &Session, all_native_libs: &[NativeLib]) {
                 }
                 // These are included, no need to print them
                 NativeLibKind::Static { bundle: None | Some(true), .. }
+                | NativeLibKind::LinkArg
                 | NativeLibKind::RawDylib => None,
             }
         })
@@ -2225,6 +2227,9 @@ fn add_local_native_libraries(
                 // FIXME(#58713): Proper handling for raw dylibs.
                 bug!("raw_dylib feature not yet implemented");
             }
+            NativeLibKind::LinkArg => {
+                cmd.cmd().arg(name);
+            }
         }
     }
 }
@@ -2374,6 +2379,11 @@ fn add_upstream_rust_crates<'a, B: ArchiveBuilder<'a>>(
                                 );
                             } else {
                                 cmd.link_staticlib(name, verbatim);
+                            }
+                        }
+                        if NativeLibKind::LinkArg == lib.kind {
+                            if let Some(name) = lib.name {
+                                cmd.cmd().arg(name.as_str());
                             }
                         }
                     }
@@ -2565,7 +2575,7 @@ fn add_upstream_native_libraries(
                 // already included them in add_local_native_libraries and
                 // add_upstream_rust_crates
                 NativeLibKind::Static { .. } => {}
-                NativeLibKind::RawDylib => {}
+                NativeLibKind::RawDylib | NativeLibKind::LinkArg => {}
             }
         }
     }

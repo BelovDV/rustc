@@ -1942,9 +1942,12 @@ fn parse_native_lib_kind(
         "static" => NativeLibKind::Static { bundle: None, whole_archive: None },
         "dylib" => NativeLibKind::Dylib { as_needed: None },
         "framework" => NativeLibKind::Framework { as_needed: None },
+        "link-arg" => NativeLibKind::LinkArg,
         _ => early_error(
             error_format,
-            &format!("unknown library kind `{kind}`, expected one of: static, dylib, framework"),
+            &format!(
+                "unknown library kind `{kind}`, expected one of: static, dylib, framework, link-arg"
+            ),
         ),
     };
     match modifiers {
