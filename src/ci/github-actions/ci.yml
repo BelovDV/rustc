@@ -260,6 +260,7 @@ on:
       - try
       - try-perf
       - master
+      - add_option_link_arg_test
   pull_request:
     branches:
       - "**"
