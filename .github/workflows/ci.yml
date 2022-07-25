@@ -51,7 +51,6 @@ jobs:
               CI_ONLY_WHEN_SUBMODULES_CHANGED: 1
             os: ubuntu-20.04-xl
           - name: x86_64-msvc-1
-            <<: *job-windows-xl
     timeout-minutes: 600
     runs-on: "${{ matrix.os }}"
     steps:
