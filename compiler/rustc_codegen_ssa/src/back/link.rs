@@ -300,54 +300,47 @@ fn link_rlib<'a, B: ArchiveBuilder<'a>>(
         }
     }
 
-    // Note that in this loop we are ignoring the value of `lib.cfg`. That is,
-    // we may not be configured to actually include a static library if we're
-    // adding it here. That's because later when we consume this rlib we'll
-    // decide whether we actually needed the static library or not.
-    //
-    // To do this "correctly" we'd need to keep track of which libraries added
-    // which object files to the archive. We don't do that here, however. The
-    // #[link(cfg(..))] feature is unstable, though, and only intended to get
-    // liblibc working. In that sense the check below just indicates that if
-    // there are any libraries we want to omit object files for at link time we
-    // just exclude all custom object files.
-    //
-    // Eventually if we want to stabilize or flesh out the #[link(cfg(..))]
-    // feature then we'll need to figure out how to record what objects were
-    // loaded from the libraries found here and then encode that into the
-    // metadata of the rlib we're generating somehow.
-    for lib in codegen_results.crate_info.used_libraries.iter() {
-        match lib.kind {
-            NativeLibKind::Static { bundle: None | Some(true), whole_archive: Some(true) }
-                if flavor == RlibFlavor::Normal =>
-            {
-                // Don't allow mixing +bundle with +whole_archive since an rlib may contain
-                // multiple native libs, some of which are +whole-archive and some of which are
-                // -whole-archive and it isn't clear how we can currently handle such a
-                // situation correctly.
-                // See https://github.com/rust-lang/rust/issues/88085#issuecomment-901050897
-                sess.err(
-                    "the linking modifiers `+bundle` and `+whole-archive` are not compatible \
-                        with each other when generating rlibs",
-                );
+    if flavor == RlibFlavor::StaticlibBase {
+        // Note that in this loop we are ignoring the value of `lib.cfg`. That is,
+        // we may not be configured to actually include a static library if we're
+        // adding it here. That's because later when we consume this rlib we'll
+        // decide whether we actually needed the static library or not.
+        //
+        // To do this "correctly" we'd need to keep track of which libraries added
+        // which object files to the archive. We don't do that here, however. The
+        // #[link(cfg(..))] feature is unstable, though, and only intended to get
+        // liblibc working. In that sense the check below just indicates that if
+        // there are any libraries we want to omit object files for at link time we
+        // just exclude all custom object files.
+        //
+        // Eventually if we want to stabilize or flesh out the #[link(cfg(..))]
+        // feature then we'll need to figure out how to record what objects were
+        // loaded from the libraries found here and then encode that into the
+        // metadata of the rlib we're generating somehow.
+        for lib in codegen_results.crate_info.used_libraries.iter() {
+            match lib.kind {
+                NativeLibKind::Static { bundle: None | Some(true), .. } => {}
+                NativeLibKind::Static { bundle: Some(false), .. }
+                | NativeLibKind::Dylib { .. }
+                | NativeLibKind::Framework { .. }
+                | NativeLibKind::RawDylib
+                | NativeLibKind::Unspecified => continue,
             }
-            NativeLibKind::Static { bundle: None | Some(true), .. } => {}
-            NativeLibKind::Static { bundle: Some(false), .. }
-            | NativeLibKind::Dylib { .. }
-            | NativeLibKind::Framework { .. }
-            | NativeLibKind::RawDylib
-            | NativeLibKind::Unspecified => continue,
-        }
-        if let Some(name) = lib.name {
-            let location =
-                find_library(name.as_str(), lib.verbatim.unwrap_or(false), &lib_search_paths, sess);
-            ab.add_archive(&location, |_| false).unwrap_or_else(|e| {
-                sess.fatal(&format!(
-                    "failed to add native library {}: {}",
-                    location.to_string_lossy(),
-                    e
-                ));
-            });
+            if let Some(name) = lib.name {
+                let location = find_library(
+                    name.as_str(),
+                    lib.verbatim.unwrap_or(false),
+                    &lib_search_paths,
+                    sess,
+                );
+                ab.add_archive(&location, |_| false).unwrap_or_else(|e| {
+                    sess.fatal(&format!(
+                        "failed to add native library {}: {}",
+                        location.to_string_lossy(),
+                        e
+                    ));
+                });
+            }
         }
     }
 
@@ -384,6 +377,28 @@ fn link_rlib<'a, B: ArchiveBuilder<'a>>(
         // Basically, all this means is that this code should not move above the
         // code above.
         ab.add_file(&trailing_metadata);
+    }
+
+    if flavor == RlibFlavor::Normal {
+        for lib in codegen_results.crate_info.used_libraries.iter() {
+            match lib.kind {
+                NativeLibKind::Static { bundle: None | Some(true), .. } => {}
+                NativeLibKind::Static { bundle: Some(false), .. }
+                | NativeLibKind::Dylib { .. }
+                | NativeLibKind::Framework { .. }
+                | NativeLibKind::RawDylib
+                | NativeLibKind::Unspecified => continue,
+            }
+            if let Some(name) = lib.name {
+                let location = find_library(
+                    name.as_str(),
+                    lib.verbatim.unwrap_or(false),
+                    &lib_search_paths,
+                    sess,
+                );
+                ab.add_file(&location)
+            }
+        }
     }
 
     return Ok(ab);
@@ -2447,73 +2462,33 @@ fn add_upstream_rust_crates<'a, B: ArchiveBuilder<'a>>(
         let src = &codegen_results.crate_info.used_crate_source[&cnum];
         let cratepath = &src.rlib.as_ref().unwrap().0;
 
-        let mut link_upstream = |path: &Path| {
-            cmd.link_rlib(&fix_windows_verbatim_for_gcc(path));
-        };
-
-        // See the comment above in `link_staticlib` and `link_rlib` for why if
-        // there's a static library that's not relevant we skip all object
-        // files.
-        let native_libs = &codegen_results.crate_info.native_libraries[&cnum];
-        let skip_native = native_libs.iter().any(|lib| {
-            matches!(lib.kind, NativeLibKind::Static { bundle: None | Some(true), .. })
-                && !relevant_lib(sess, lib)
-        });
-
-        if (!are_upstream_rust_objects_already_included(sess)
-            || ignored_for_lto(sess, &codegen_results.crate_info, cnum))
-            && !skip_native
-        {
-            link_upstream(cratepath);
-            return;
+        cmd.link_rlib(&fix_windows_verbatim_for_gcc(cratepath));
+        for lib in &codegen_results.crate_info.native_libraries[&cnum] {
+            let Some(name) = lib.name else {
+                continue;
+            };
+            let name = name.as_str();
+            if !relevant_lib(sess, lib) {
+                continue;
+            }
+            let verbatim = lib.verbatim.unwrap_or(false);
+            if let NativeLibKind::Static { bundle: Some(true) | None, whole_archive } = lib.kind {
+                if whole_archive == Some(true) {
+                    cmd.link_whole_staticlib(name, verbatim, &[PathBuf::from(tmpdir)])
+                } else {
+                    cmd.link_staticlib(name, verbatim);
+                    cmd.include_path(tmpdir)
+                }
+            }
         }
 
-        let dst = tmpdir.join(cratepath.file_name().unwrap());
-        let name = cratepath.file_name().unwrap().to_str().unwrap();
-        let name = &name[3..name.len() - 5]; // chop off lib/.rlib
-
-        sess.prof.generic_activity_with_arg("link_altering_rlib", name).run(|| {
-            let canonical_name = name.replace('-', "_");
-            let upstream_rust_objects_already_included =
-                are_upstream_rust_objects_already_included(sess);
-            let is_builtins = sess.target.no_builtins
-                || !codegen_results.crate_info.is_no_builtins.contains(&cnum);
-
-            let mut archive = <B as ArchiveBuilder>::new(sess, &dst);
-            if let Err(e) = archive.add_archive(cratepath, move |f| {
-                if f == METADATA_FILENAME {
-                    return true;
-                }
-
-                let canonical = f.replace('-', "_");
-
-                let is_rust_object =
-                    canonical.starts_with(&canonical_name) && looks_like_rust_object_file(&f);
-
-                // If we've been requested to skip all native object files
-                // (those not generated by the rust compiler) then we can skip
-                // this file. See above for why we may want to do this.
-                let skip_because_cfg_say_so = skip_native && !is_rust_object;
-
-                // If we're performing LTO and this is a rust-generated object
-                // file, then we don't need the object file as it's part of the
-                // LTO module. Note that `#![no_builtins]` is excluded from LTO,
-                // though, so we let that object file slide.
-                let skip_because_lto =
-                    upstream_rust_objects_already_included && is_rust_object && is_builtins;
-
-                if skip_because_cfg_say_so || skip_because_lto {
-                    return true;
-                }
-
-                false
-            }) {
-                sess.fatal(&format!("failed to build archive from rlib: {}", e));
+        B::unpack_archive(cratepath, tmpdir, |fname: &str| {
+            if !fname.ends_with(".a") {
+                return true;
             }
-            if archive.build() {
-                link_upstream(&dst);
-            }
-        });
+            return false;
+        })
+        .unwrap();
     }
 
     // Same thing as above, but for dynamic crates instead of static crates.

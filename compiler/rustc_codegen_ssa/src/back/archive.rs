@@ -53,6 +53,10 @@ pub trait ArchiveBuilder<'a> {
 
     fn sess(&self) -> &Session;
 
+    fn unpack_archive<F>(archive: &PathBuf, output: &Path, skip: F) -> io::Result<()>
+    where
+        F: FnMut(&str) -> bool + 'static;
+
     /// Creates a DLL Import Library <https://docs.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-creation#creating-an-import-library>.
     /// and returns the path on disk to that import library.
     /// This functions doesn't take `self` so that it can be called from

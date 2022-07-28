@@ -238,6 +238,36 @@ impl<'a> ArchiveBuilder<'a> for LlvmArchiveBuilder<'a> {
 
         output_path
     }
+
+    fn unpack_archive<F>(archive: &PathBuf, output: &Path, mut skip: F) -> io::Result<()>
+    where
+        F: FnMut(&str) -> bool + 'static,
+    {
+        let archive = ArchiveRO::open(archive).unwrap();
+
+        for child in archive.iter() {
+            let lib = child.map_err(string_to_io_error)?;
+            let Some(name) = &lib.name() else {
+                continue;
+            };
+
+            if skip(name) {
+                continue;
+            }
+
+            let data = lib.data();
+            let out = output.join(name);
+
+            match std::fs::write(out, data) {
+                Ok(_) => {}
+                Err(err) => {
+                    panic!("{}", err.kind().to_string());
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl<'a> LlvmArchiveBuilder<'a> {
