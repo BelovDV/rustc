@@ -4,4 +4,4 @@
 // build-fail
 // error-pattern: the linking modifiers `+bundle` and `+whole-archive` are not compatible with each other when generating rlibs
 
-fn main() {}
+fn main() { }
