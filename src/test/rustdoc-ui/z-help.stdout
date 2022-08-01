@@ -140,6 +140,7 @@
         `wall-time` (monotonic clock, i.e. `std::time::Instant`)
         `instructions:u` (retired instructions, userspace-only)
         `instructions-minus-irqs:u` (subtracting hardware interrupt counts for extra accuracy)
+    -Z       separate-native-rlib-dependencies=val -- change rlib format to store native libraries as archieves
     -Z                          share-generics=val -- make the current crate share its generic instantiations
     -Z                               show-span=val -- show spans for compiler debugging (expr|pat|ty)
     -Z                              span-debug=val -- forward proc_macro::Span's `Debug` impl to `Span`

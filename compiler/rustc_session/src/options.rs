@@ -1510,6 +1510,8 @@ options! {
         `instructions:u` (retired instructions, userspace-only)
         `instructions-minus-irqs:u` (subtracting hardware interrupt counts for extra accuracy)"
     ),
+    separate_native_rlib_dependencies: bool = (false, parse_bool, [TRACKED],
+        "change rlib format to store native libraries as archieves"),
     share_generics: Option<bool> = (None, parse_opt_bool, [TRACKED],
         "make the current crate share its generic instantiations"),
     show_span: Option<String> = (None, parse_opt_string, [TRACKED],
