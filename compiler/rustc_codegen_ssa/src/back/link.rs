@@ -2390,6 +2390,12 @@ fn add_upstream_rust_crates<'a, B: ArchiveBuilder<'a>>(
                 // will provide them to the linker itself.
                 if sess.opts.unstable_opts.link_native_libraries {
                     let mut last = (None, NativeLibKind::Unspecified, None);
+                    if sess.opts.unstable_opts.separate_native_rlib_dependencies {
+                        B::unpack_archive(&src.rlib.as_ref().unwrap().0, tmpdir, |fname: &str| {
+                            !fname.ends_with(".a")
+                        })
+                        .unwrap();
+                    }
                     for lib in &codegen_results.crate_info.native_libraries[&cnum] {
                         let Some(name) = lib.name else {
                             continue;
@@ -2405,7 +2411,29 @@ fn add_upstream_rust_crates<'a, B: ArchiveBuilder<'a>>(
                         } else {
                             (lib.name, lib.kind, lib.verbatim)
                         };
-
+                        /*
+                        match lib.kind {
+                            NativeLibKind::Static { bundle: Some(false), whole_archive }
+                            | NativeLibKind::Static { bundle: Some(true) | None, whole_archive }
+                                if sess.opts.unstable_opts.separate_native_rlib_dependencies =>
+                            {
+                                let verbatim = lib.verbatim.unwrap_or(false);
+                                let tmp_path = &[PathBuf::from(tmpdir)];
+                                let path: &[PathBuf] =
+                                    if sess.opts.unstable_opts.separate_native_rlib_dependencies {
+                                        tmp_path
+                                    } else {
+                                        search_path.get_or_init(|| archive_search_paths(sess))
+                                    };
+                                if whole_archive == Some(true) {
+                                    cmd.link_whole_staticlib(name, verbatim, path);
+                                } else {
+                                    cmd.link_staticlib(name, verbatim);
+                                }
+                            }
+                            _ => {}
+                        };
+                        */
                         if let NativeLibKind::Static { bundle: Some(false), whole_archive } =
                             lib.kind
                         {
@@ -2420,6 +2448,25 @@ fn add_upstream_rust_crates<'a, B: ArchiveBuilder<'a>>(
                                 cmd.link_staticlib(name, verbatim);
                             }
                         }
+                        if sess.opts.unstable_opts.separate_native_rlib_dependencies {
+                            if let NativeLibKind::Static {
+                                bundle: Some(true) | None,
+                                whole_archive,
+                            } = lib.kind
+                            {
+                                let verbatim = lib.verbatim.unwrap_or(false);
+                                if whole_archive == Some(true) {
+                                    cmd.link_whole_staticlib(
+                                        name,
+                                        verbatim,
+                                        &[PathBuf::from(tmpdir)],
+                                    );
+                                } else {
+                                    cmd.link_staticlib(name, verbatim);
+                                }
+                            }
+                        }
+                        //
                     }
                 }
             }
@@ -2472,66 +2519,15 @@ fn add_upstream_rust_crates<'a, B: ArchiveBuilder<'a>>(
     ) {
         let src = &codegen_results.crate_info.used_crate_source[&cnum];
         let cratepath = &src.rlib.as_ref().unwrap().0;
-        let native_libs = &codegen_results.crate_info.native_libraries[&cnum];
-        let crate_name = cratepath.file_name().unwrap().to_str().unwrap();
 
-        // New rlib format
-        if sess.opts.unstable_opts.separate_native_rlib_dependencies {
-            cmd.link_rlib(&fix_windows_verbatim_for_gcc(cratepath));
-            if are_upstream_rust_objects_already_included(sess) {
-                return;
-            }
-            for lib in native_libs {
-                let Some(name) = lib.name else {
-                continue;
-            };
-                let name = name.as_str();
-                let NativeLibKind::Static { bundle: Some(true) | None, whole_archive } = lib.kind else {
-                    continue;
-                };
-                if !ignored_for_lto(sess, &codegen_results.crate_info, cnum) {
-                    if name == METADATA_FILENAME {
-                        continue;
-                    }
-                    let relevant = relevant_lib(sess, lib);
-                    let crate_name = &crate_name[3..crate_name.len() - 5]; // chop off lib/.rlib
-                    let canonical_name = crate_name.replace('-', "_");
-                    let is_rust_object = name.replace('-', "_").starts_with(&canonical_name)
-                        && looks_like_rust_object_file(&name);
-                    let is_builtins = sess.target.no_builtins
-                        || !codegen_results.crate_info.is_no_builtins.contains(&cnum);
-                    let skip_because_cfg_say_so = !relevant && !is_rust_object;
-                    let skip_because_lto = is_rust_object && is_builtins;
-                    if skip_because_cfg_say_so || skip_because_lto {
-                        continue;
-                    }
-                }
-                let verbatim = lib.verbatim.unwrap_or(false);
-                if whole_archive == Some(true) {
-                    cmd.link_whole_staticlib(name, verbatim, &[PathBuf::from(tmpdir)])
-                } else {
-                    cmd.link_staticlib(name, verbatim);
-                    cmd.include_path(tmpdir)
-                }
-            }
-
-            B::unpack_archive(cratepath, tmpdir, |fname: &str| {
-                if !fname.ends_with(".a") {
-                    return true;
-                }
-                return false;
-            })
-            .unwrap();
-            return;
-        }
-
-        // Old rlib format
         let mut link_upstream = |path: &Path| {
             cmd.link_rlib(&fix_windows_verbatim_for_gcc(path));
         };
+
         // See the comment above in `link_staticlib` and `link_rlib` for why if
         // there's a static library that's not relevant we skip all object
         // files.
+        let native_libs = &codegen_results.crate_info.native_libraries[&cnum];
         let skip_native = native_libs.iter().any(|lib| {
             matches!(lib.kind, NativeLibKind::Static { bundle: None | Some(true), .. })
                 && !relevant_lib(sess, lib)
@@ -2546,10 +2542,11 @@ fn add_upstream_rust_crates<'a, B: ArchiveBuilder<'a>>(
         }
 
         let dst = tmpdir.join(cratepath.file_name().unwrap());
+        let name = cratepath.file_name().unwrap().to_str().unwrap();
+        let name = &name[3..name.len() - 5]; // chop off lib/.rlib
 
-        let crate_name = &crate_name[3..crate_name.len() - 5]; // chop off lib/.rlib
-        let canonical_name = crate_name.replace('-', "_");
-        sess.prof.generic_activity_with_arg("link_altering_rlib", crate_name).run(|| {
+        sess.prof.generic_activity_with_arg("link_altering_rlib", name).run(|| {
+            let canonical_name = name.replace('-', "_");
             let upstream_rust_objects_already_included =
                 are_upstream_rust_objects_already_included(sess);
             let is_builtins = sess.target.no_builtins
@@ -2577,6 +2574,12 @@ fn add_upstream_rust_crates<'a, B: ArchiveBuilder<'a>>(
                 // though, so we let that object file slide.
                 let skip_because_lto =
                     upstream_rust_objects_already_included && is_rust_object && is_builtins;
+
+                if
+                // sess.opts.unstable_opts.separate_native_rlib_dependencies &&
+                f.ends_with(".a") {
+                    return true;
+                }
 
                 if skip_because_cfg_say_so || skip_because_lto {
                     return true;
