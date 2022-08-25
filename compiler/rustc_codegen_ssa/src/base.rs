@@ -36,9 +36,9 @@ use rustc_session::cgu_reuse_tracker::CguReuse;
 use rustc_session::config::{self, CrateType, EntryFnType, OutputType};
 use rustc_session::Session;
 use rustc_span::symbol::sym;
-use rustc_span::Symbol;
 use rustc_span::{DebuggerVisualizerFile, DebuggerVisualizerType};
 use rustc_target::abi::{Align, VariantIdx};
+use rustc_target::spec::HasTargetSpec;
 
 use std::collections::BTreeSet;
 use std::convert::TryFrom;
@@ -845,14 +845,19 @@ impl CrateInfo {
 
         // Handle circular dependencies in the standard library.
         // See comment before `add_linked_symbol_object` function for the details.
-        let missing_weak_lang_items: FxHashSet<&Symbol> = info
+        let missing_weak_lang_items: FxHashSet<String> = info
             .used_crates
             .iter()
-            .flat_map(|cnum| {
-                tcx.missing_lang_items(*cnum)
-                    .iter()
-                    .filter(|l| lang_items::required(tcx, **l))
-                    .filter_map(|item| WEAK_ITEMS_SYMBOLS.get(item))
+            .flat_map(|cnum| tcx.missing_lang_items(*cnum).iter())
+            .filter(|l| lang_items::required(tcx, **l))
+            .filter_map(|item| WEAK_ITEMS_SYMBOLS.get(item))
+            .map(|item| {
+                if tcx.target_spec().is_like_windows && tcx.target_spec().arch == "x86" {
+                    let item = item.to_string();
+                    format!("_{item}")
+                } else {
+                    item.to_string()
+                }
             })
             .collect();
         info.linked_symbols
@@ -862,7 +867,7 @@ impl CrateInfo {
                 linked_symbols.extend(
                     missing_weak_lang_items
                         .iter()
-                        .map(|item| (item.to_string(), SymbolExportKind::Text)),
+                        .map(|item| (item.clone(), SymbolExportKind::Text)),
                 )
             });
 
