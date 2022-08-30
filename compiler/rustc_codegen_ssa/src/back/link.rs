@@ -2370,7 +2370,7 @@ fn add_upstream_rust_crates<'a>(
                 // If `-Zlink-native-libraries=false` is set, then the assumption is that an
                 // external build system already has the native dependencies defined, and it
                 // will provide them to the linker itself.
-                if sess.opts.unstable_opts.link_native_libraries {
+                let mut link_native_libraries = || {
                     let mut last = (None, NativeLibKind::Unspecified, None);
                     for lib in &codegen_results.crate_info.native_libraries[&cnum] {
                         let Some(name) = lib.name else {
@@ -2417,6 +2417,12 @@ fn add_upstream_rust_crates<'a>(
                                 whole_archive: _,
                             } => {}
                         }
+                    }
+                };
+                if sess.opts.unstable_opts.link_native_libraries {
+                    link_native_libraries();
+                    if &codegen_results.crate_info.crate_name[&cnum].as_str() == &"libc" {
+                        link_native_libraries();
                     }
                 }
             }
