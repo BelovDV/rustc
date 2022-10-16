@@ -8,7 +8,7 @@ use rustc_errors::{ErrorGuaranteed, Handler};
 use rustc_fs_util::fix_windows_verbatim_for_gcc;
 use rustc_hir::def_id::CrateNum;
 use rustc_metadata::find_native_static_library;
-use rustc_metadata::fs::{emit_metadata, METADATA_FILENAME};
+use rustc_metadata::fs::{emit_wrapper_file, METADATA_FILENAME};
 use rustc_middle::middle::dependency_format::Linkage;
 use rustc_middle::middle::exported_symbols::SymbolExportKind;
 use rustc_session::config::{self, CFGuard, CrateType, DebugInfo, LdImpl, Strip};
@@ -29,7 +29,7 @@ use rustc_target::spec::{RelocModel, RelroLevel, SanitizerSet, SplitDebuginfo, T
 use super::archive::{ArchiveBuilder, ArchiveBuilderBuilder};
 use super::command::Command;
 use super::linker::{self, Linker};
-use super::metadata::{create_rmeta_file, MetadataPosition};
+use super::metadata::{create_wrapper_file, MetadataPosition};
 use super::rpath::{self, RPathConfig};
 use crate::{
     errors, looks_like_rust_object_file, CodegenResults, CompiledModule, CrateInfo, NativeLib,
@@ -44,6 +44,7 @@ use std::cell::OnceCell;
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
+use std::io::Read;
 use std::io::{BufWriter, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -269,8 +270,8 @@ fn link_rlib<'a>(
     let trailing_metadata = match flavor {
         RlibFlavor::Normal => {
             let (metadata, metadata_position) =
-                create_rmeta_file(sess, codegen_results.metadata.raw_data());
-            let metadata = emit_metadata(sess, &metadata, tmpdir);
+                create_wrapper_file(sess, b".rmeta".to_vec(), codegen_results.metadata.raw_data());
+            let metadata = emit_wrapper_file(sess, &metadata, tmpdir, METADATA_FILENAME);
             match metadata_position {
                 MetadataPosition::First => {
                     // Most of the time metadata in rlib files is wrapped in a "dummy" object
@@ -414,7 +415,16 @@ fn link_rlib<'a>(
     // Add all bundled static native library dependencies.
     // Archives added to the end of .rlib archive, see comment above for the reason.
     for lib in packed_bundled_libs {
-        ab.add_file(&lib)
+        let mut src = fs::File::open(&lib).unwrap();
+        let mut x = Default::default();
+        src.read_to_end(&mut x).unwrap();
+        let (data, _) = create_wrapper_file(sess, b".rlib_entry".to_vec(), &x);
+        ab.add_file(&emit_wrapper_file(
+            sess,
+            &data,
+            tmpdir,
+            lib.file_name().unwrap().to_str().unwrap(),
+        ));
     }
 
     return Ok(ab);
