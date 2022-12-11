@@ -497,36 +497,12 @@ fn link_staticlib<'a>(
     let mut all_native_libs = vec![];
 
     let res = each_linked_rlib(sess, &codegen_results.crate_info, &mut |cnum, path| {
-        let name = codegen_results.crate_info.crate_name[&cnum];
-        let native_libs = &codegen_results.crate_info.native_libraries[&cnum];
-
-        // Here when we include the rlib into our staticlib we need to make a
-        // decision whether to include the extra object files along the way.
-        // These extra object files come from statically included native
-        // libraries, but they may be cfg'd away with #[link(cfg(..))].
-        //
-        // This unstable feature, though, only needs liblibc to work. The only
-        // use case there is where musl is statically included in liblibc.rlib,
-        // so if we don't want the included version we just need to skip it. As
-        // a result the logic here is that if *any* linked library is cfg'd away
-        // we just skip all object files.
-        //
-        // Clearly this is not sufficient for a general purpose feature, and
-        // we'd want to read from the library's metadata to determine which
-        // object files come from where and selectively skip them.
-        let skip_object_files = native_libs.iter().any(|lib| {
-            matches!(lib.kind, NativeLibKind::Static { bundle: None | Some(true), .. })
-                && !relevant_lib(sess, lib)
-        });
-
         let lto = are_upstream_rust_objects_already_included(sess)
             && !ignored_for_lto(sess, &codegen_results.crate_info, cnum);
 
-        // Ignoring obj file starting with the crate name
-        // as simple comparison is not enough - there
-        // might be also an extra name suffix
-        let obj_start = name.as_str().to_owned();
+        let native_libs = &codegen_results.crate_info.native_libraries[&cnum];
 
+        let bundled: FxHashSet<_> = native_libs.iter().filter_map(|lib| lib.filename).collect();
         ab.add_archive(
             path,
             Box::new(move |fname: &str| {
@@ -540,9 +516,8 @@ fn link_staticlib<'a>(
                     return true;
                 }
 
-                // Otherwise if this is *not* a rust object and we're skipping
-                // objects then skip this file
-                if skip_object_files && (!fname.starts_with(&obj_start) || !fname.ends_with(".o")) {
+                // Skip objects for bundled libs.
+                if bundled.iter().any(|l| l.as_str() == fname) {
                     return true;
                 }
 
@@ -550,7 +525,17 @@ fn link_staticlib<'a>(
                 false
             }),
         )
-        .unwrap();
+        .unwrap(); // It may be error?
+
+        let bundled: FxHashSet<_> = native_libs.iter().filter_map(|lib| lib.filename).collect();
+        archive_builder_builder
+            .extract_bundled_libs(path, tempdir.as_ref(), &bundled)
+            .unwrap_or_else(|e| sess.emit_fatal(e));
+        for name in bundled {
+            let joined = tempdir.as_ref().join(name.as_str());
+            let path = joined.as_path();
+            ab.add_archive(path, Box::new(|_| false)).unwrap();
+        }
 
         all_native_libs.extend(codegen_results.crate_info.native_libraries[&cnum].iter().cloned());
     });
@@ -2570,6 +2555,8 @@ fn add_static_crate<'a>(
         matches!(lib.kind, NativeLibKind::Static { bundle: None | Some(true), .. })
             && !relevant_lib(sess, lib)
     });
+    let _ = skip_native;
+    let skip_native = false;
 
     if (!are_upstream_rust_objects_already_included(sess)
         || ignored_for_lto(sess, &codegen_results.crate_info, cnum))
