@@ -59,17 +59,28 @@ fn find_bundled_library(
     name: Option<Symbol>,
     verbatim: Option<bool>,
     kind: NativeLibKind,
+    cfg: &Option<rustc_ast::MetaItem>,
     sess: &Session,
 ) -> Option<Symbol> {
-    if sess.opts.unstable_opts.packed_bundled_libs &&
-            sess.crate_types().iter().any(|ct| ct == &CrateType::Rlib || ct == &CrateType::Staticlib) &&
-            let NativeLibKind::Static { bundle: Some(true) | None, .. } = kind {
+    let NativeLibKind::Static { bundle: Some(true) | None, whole_archive } = kind else {
+        return None
+    };
+    if !sess.crate_types().iter().any(|ct| ct == &CrateType::Rlib || ct == &CrateType::Staticlib) {
+        return None;
+    }
+    if sess.opts.unstable_opts.packed_bundled_libs
+        || cfg.is_some()
+        || whole_archive.unwrap_or(false)
+    {
         find_native_static_library(
             name.unwrap().as_str(),
             verbatim.unwrap_or(false),
             &sess.target_filesearch(PathKind::Native).search_path_dirs(),
             sess,
-        ).file_name().and_then(|s| s.to_str()).map(Symbol::intern)
+        )
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(Symbol::intern)
     } else {
         None
     }
@@ -393,7 +404,7 @@ impl<'tcx> Collector<'tcx> {
 
             let name = name.map(|(name, _)| name);
             let kind = kind.unwrap_or(NativeLibKind::Unspecified);
-            let filename = find_bundled_library(name, verbatim, kind, sess);
+            let filename = find_bundled_library(name, verbatim, kind, &cfg, sess);
             self.libs.push(NativeLib {
                 name,
                 filename,
@@ -479,12 +490,12 @@ impl<'tcx> Collector<'tcx> {
                 let new_name: Option<&str> = passed_lib.new_name.as_deref();
                 let name = Some(Symbol::intern(new_name.unwrap_or(&passed_lib.name)));
                 let sess = self.tcx.sess;
-                let filename =
-                    find_bundled_library(name, passed_lib.verbatim, passed_lib.kind, sess);
+                let kind = passed_lib.kind;
+                let filename = find_bundled_library(name, passed_lib.verbatim, kind, &None, sess);
                 self.libs.push(NativeLib {
                     name,
                     filename,
-                    kind: passed_lib.kind,
+                    kind,
                     cfg: None,
                     foreign_module: None,
                     wasm_import_module: None,
