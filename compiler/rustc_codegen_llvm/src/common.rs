@@ -15,7 +15,7 @@ use rustc_middle::bug;
 use rustc_middle::mir::interpret::{ConstAllocation, GlobalAlloc, Scalar};
 use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
 use rustc_middle::ty::TyCtxt;
-use rustc_session::cstore::{DllCallingConvention, DllImport, PeImportNameType};
+use rustc_session::cstore::{DllCallingConvention, DllImport, NativeLibKind, PeImportNameType};
 use rustc_target::abi::{self, AddressSpace, HasDataLayout, Pointer, Size};
 use rustc_target::spec::Target;
 
@@ -368,7 +368,12 @@ pub(crate) fn get_dllimport<'tcx>(
     name: &str,
 ) -> Option<&'tcx DllImport> {
     tcx.native_library(id)
-        .map(|lib| lib.dll_imports.iter().find(|di| di.name.as_str() == name))
+        .and_then(|lib| match &lib.kind {
+            NativeLibKind::RawDylib { dll_imports } => {
+                Some(dll_imports.iter().find(|di| di.name.as_str() == name))
+            }
+            _ => None,
+        })
         .flatten()
 }
 

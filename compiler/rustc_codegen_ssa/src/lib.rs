@@ -33,8 +33,7 @@ use rustc_middle::ty::query::{ExternProviders, Providers};
 use rustc_serialize::opaque::{MemDecoder, MemEncoder};
 use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
 use rustc_session::config::{CrateType, OutputFilenames, OutputType, RUST_CGU_EXT};
-use rustc_session::cstore::{self, CrateSource};
-use rustc_session::utils::NativeLibKind;
+use rustc_session::cstore::{self, CrateSource, NativeLibKind};
 use rustc_span::symbol::Symbol;
 use rustc_span::DebuggerVisualizerFile;
 use std::collections::BTreeSet;
@@ -114,22 +113,18 @@ bitflags::bitflags! {
 #[derive(Clone, Debug, Encodable, Decodable, HashStable)]
 pub struct NativeLib {
     pub kind: NativeLibKind,
-    pub name: Option<Symbol>,
-    pub filename: Option<Symbol>,
+    pub name: Symbol,
     pub cfg: Option<ast::MetaItem>,
     pub verbatim: bool,
-    pub dll_imports: Vec<cstore::DllImport>,
 }
 
 impl From<&cstore::NativeLib> for NativeLib {
     fn from(lib: &cstore::NativeLib) -> Self {
         NativeLib {
-            kind: lib.kind,
-            filename: lib.filename,
+            kind: lib.kind.clone(),
             name: lib.name,
             cfg: lib.cfg.clone(),
             verbatim: lib.verbatim.unwrap_or(false),
-            dll_imports: lib.dll_imports.clone(),
         }
     }
 }

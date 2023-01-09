@@ -13,10 +13,9 @@ use rustc_middle::middle::dependency_format::Linkage;
 use rustc_middle::middle::exported_symbols::SymbolExportKind;
 use rustc_session::config::{self, CFGuard, CrateType, DebugInfo, LdImpl, Strip};
 use rustc_session::config::{OutputFilenames, OutputType, PrintRequest, SplitDwarfKind};
-use rustc_session::cstore::DllImport;
+use rustc_session::cstore::{DllImport, NativeLibKind};
 use rustc_session::output::{check_file_is_writeable, invalid_output_for_target, out_filename};
 use rustc_session::search_paths::PathKind;
-use rustc_session::utils::NativeLibKind;
 /// For all the linkers we support, and information they might
 /// need out of the shared crate context before we get rid of it.
 use rustc_session::{filesearch, Session};
@@ -348,8 +347,15 @@ fn link_rlib<'a>(
     // metadata of the rlib we're generating somehow.
     for lib in codegen_results.crate_info.used_libraries.iter() {
         match lib.kind {
-            NativeLibKind::Static { bundle: None | Some(true), whole_archive: Some(true) }
-                if flavor == RlibFlavor::Normal && sess.opts.unstable_opts.packed_bundled_libs => {}
+            NativeLibKind::StaticPacked { filename, .. } => {
+                let lib_path =
+                    find_native_static_library(filename.as_str(), true, &lib_search_paths, sess);
+                let src = read(lib_path)
+                    .map_err(|e| sess.emit_fatal(errors::ReadFileError { message: e }))?;
+                let (data, _) = create_wrapper_file(sess, b".bundled_lib".to_vec(), &src);
+                let wrapper_file = emit_wrapper_file(sess, &data, tmpdir, filename.as_str());
+                packed_bundled_libs.push(wrapper_file);
+            }
             NativeLibKind::Static { bundle: None | Some(true), whole_archive: Some(true) }
                 if flavor == RlibFlavor::Normal =>
             {
@@ -360,31 +366,24 @@ fn link_rlib<'a>(
                 // See https://github.com/rust-lang/rust/issues/88085#issuecomment-901050897
                 sess.emit_err(errors::IncompatibleLinkingModifiers);
             }
-            NativeLibKind::Static { bundle: None | Some(true), .. } => {}
+            NativeLibKind::Static { bundle: None | Some(true), .. } => {
+                let location = find_native_static_library(
+                    lib.name.as_str(),
+                    lib.verbatim,
+                    &lib_search_paths,
+                    sess,
+                );
+                ab.add_archive(&location, Box::new(|_| false)).unwrap_or_else(|error| {
+                    sess.emit_fatal(errors::AddNativeLibrary { library_path: location, error });
+                });
+            }
             NativeLibKind::Static { bundle: Some(false), .. }
             | NativeLibKind::Dylib { .. }
             | NativeLibKind::Framework { .. }
-            | NativeLibKind::RawDylib
+            | NativeLibKind::RawDylib { .. }
             | NativeLibKind::LinkArg
+            | NativeLibKind::WasmImportModule
             | NativeLibKind::Unspecified => continue,
-        }
-        if let Some(name) = lib.name {
-            let location =
-                find_native_static_library(name.as_str(), lib.verbatim, &lib_search_paths, sess);
-            if sess.opts.unstable_opts.packed_bundled_libs && flavor == RlibFlavor::Normal {
-                let filename = lib.filename.unwrap();
-                let lib_path =
-                    find_native_static_library(filename.as_str(), true, &lib_search_paths, sess);
-                let src = read(lib_path)
-                    .map_err(|e| sess.emit_fatal(errors::ReadFileError { message: e }))?;
-                let (data, _) = create_wrapper_file(sess, b".bundled_lib".to_vec(), &src);
-                let wrapper_file = emit_wrapper_file(sess, &data, tmpdir, filename.as_str());
-                packed_bundled_libs.push(wrapper_file);
-                continue;
-            }
-            ab.add_archive(&location, Box::new(|_| false)).unwrap_or_else(|error| {
-                sess.emit_fatal(errors::AddNativeLibrary { library_path: location, error });
-            });
         }
     }
 
@@ -456,11 +455,11 @@ fn collate_raw_dylibs<'a, 'b>(
     let mut dylib_table = FxIndexMap::<String, FxIndexMap<Symbol, &DllImport>>::default();
 
     for lib in used_libraries {
-        if lib.kind == NativeLibKind::RawDylib {
+        if let NativeLibKind::RawDylib { dll_imports } = &lib.kind {
             let ext = if lib.verbatim { "" } else { ".dll" };
-            let name = format!("{}{}", lib.name.expect("unnamed raw-dylib library"), ext);
+            let name = format!("{}{}", lib.name, ext);
             let imports = dylib_table.entry(name.clone()).or_default();
-            for import in &lib.dll_imports {
+            for import in dll_imports {
                 if let Some(old_import) = imports.insert(import.name, import) {
                     // FIXME: when we add support for ordinals, figure out if we need to do anything
                     // if we have two DllImport values with the same name but different ordinals.
@@ -1329,7 +1328,7 @@ fn print_native_static_libs(sess: &Session, all_native_libs: &[NativeLib]) {
         .iter()
         .filter(|l| relevant_lib(sess, l))
         .filter_map(|lib| {
-            let name = lib.name?;
+            let name = lib.name;
             match lib.kind {
                 NativeLibKind::Static { bundle: Some(false), .. }
                 | NativeLibKind::Dylib { .. }
@@ -1349,8 +1348,10 @@ fn print_native_static_libs(sess: &Session, all_native_libs: &[NativeLib]) {
                 }
                 // These are included, no need to print them
                 NativeLibKind::Static { bundle: None | Some(true), .. }
+                | NativeLibKind::StaticPacked { .. }
                 | NativeLibKind::LinkArg
-                | NativeLibKind::RawDylib => None,
+                | NativeLibKind::WasmImportModule
+                | NativeLibKind::RawDylib { .. } => None,
             }
         })
         .collect();
@@ -2308,21 +2309,21 @@ fn add_native_libs_from_crate(
 
     let mut last = (None, NativeLibKind::Unspecified, false);
     for lib in native_libs {
-        let Some(name) = lib.name else {
+        if let NativeLibKind::WasmImportModule = lib.kind {
             continue;
-        };
+        }
         if !relevant_lib(sess, lib) {
             continue;
         }
 
         // Skip if this library is the same as the last.
-        last = if (lib.name, lib.kind, lib.verbatim) == last {
+        last = if (Some(lib.name), lib.kind.clone(), lib.verbatim) == last {
             continue;
         } else {
-            (lib.name, lib.kind, lib.verbatim)
+            (Some(lib.name), lib.kind.clone(), lib.verbatim)
         };
 
-        let name = name.as_str();
+        let name = lib.name.as_str();
         let verbatim = lib.verbatim;
         match lib.kind {
             NativeLibKind::Static { bundle, whole_archive } => {
@@ -2338,17 +2339,7 @@ fn add_native_libs_from_crate(
                             && cnum == LOCAL_CRATE
                             && sess.opts.test);
 
-                    if bundle && cnum != LOCAL_CRATE {
-                        if let Some(filename) = lib.filename {
-                            // If rlib contains native libs as archives, they are unpacked to tmpdir.
-                            let path = tmpdir.join(filename.as_str());
-                            if whole_archive {
-                                cmd.link_whole_rlib(&path);
-                            } else {
-                                cmd.link_rlib(&path);
-                            }
-                        }
-                    } else {
+                    if bundle && cnum == LOCAL_CRATE {
                         if whole_archive {
                             cmd.link_whole_staticlib(
                                 name,
@@ -2359,6 +2350,15 @@ fn add_native_libs_from_crate(
                             cmd.link_staticlib(name, verbatim)
                         }
                     }
+                }
+            }
+            NativeLibKind::StaticPacked { whole_archive, filename, .. } => {
+                // If rlib contains native libs as archives, they are unpacked to tmpdir.
+                let path = tmpdir.join(filename.as_str());
+                if whole_archive.unwrap_or(true) {
+                    cmd.link_whole_rlib(&path);
+                } else {
+                    cmd.link_rlib(&path);
                 }
             }
             NativeLibKind::Dylib { as_needed } => {
@@ -2376,7 +2376,7 @@ fn add_native_libs_from_crate(
                     cmd.link_framework(name, as_needed.unwrap_or(true))
                 }
             }
-            NativeLibKind::RawDylib => {
+            NativeLibKind::RawDylib { .. } => {
                 // Handled separately in `linker_with_args`.
             }
             NativeLibKind::LinkArg => {
@@ -2384,6 +2384,7 @@ fn add_native_libs_from_crate(
                     cmd.arg(name);
                 }
             }
+            NativeLibKind::WasmImportModule => {} // not sure!!!
         }
     }
 }
@@ -2469,7 +2470,10 @@ fn add_upstream_rust_crates<'a>(
                 if link_static_crate {
                     bundled_libs = codegen_results.crate_info.native_libraries[&cnum]
                         .iter()
-                        .filter_map(|lib| lib.filename)
+                        .filter_map(|lib| match lib.kind {
+                            NativeLibKind::StaticPacked { filename, .. } => Some(filename),
+                            _ => None,
+                        })
                         .collect();
                     add_static_crate(
                         cmd,

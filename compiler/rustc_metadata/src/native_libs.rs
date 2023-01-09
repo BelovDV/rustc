@@ -5,6 +5,7 @@ use rustc_hir as hir;
 use rustc_hir::def::DefKind;
 use rustc_middle::ty::{List, ParamEnv, ParamEnvAnd, Ty, TyCtxt};
 use rustc_session::config::CrateType;
+use rustc_session::cstore;
 use rustc_session::cstore::{DllCallingConvention, DllImport, NativeLib, PeImportNameType};
 use rustc_session::parse::feature_err;
 use rustc_session::search_paths::PathKind;
@@ -55,23 +56,40 @@ pub fn find_native_static_library(
     sess.emit_fatal(MissingNativeLibrary::new(name, verbatim));
 }
 
-fn find_bundled_library(
-    name: Option<Symbol>,
+fn update_bundled_library(
+    kind: cstore::NativeLibKind,
+    name: Symbol,
     verbatim: Option<bool>,
-    kind: NativeLibKind,
     sess: &Session,
-) -> Option<Symbol> {
-    if sess.opts.unstable_opts.packed_bundled_libs &&
-            sess.crate_types().iter().any(|ct| ct == &CrateType::Rlib || ct == &CrateType::Staticlib) &&
-            let NativeLibKind::Static { bundle: Some(true) | None, .. } = kind {
-        find_native_static_library(
-            name.unwrap().as_str(),
-            verbatim.unwrap_or(false),
-            &sess.target_filesearch(PathKind::Native).search_path_dirs(),
-            sess,
-        ).file_name().and_then(|s| s.to_str()).map(Symbol::intern)
-    } else {
-        None
+) -> cstore::NativeLibKind {
+    match kind {
+        cstore::NativeLibKind::Static { bundle, whole_archive } => {
+            if sess.opts.unstable_opts.packed_bundled_libs
+                && bundle.unwrap_or(true)
+                && sess
+                    .crate_types()
+                    .iter()
+                    .any(|ct| ct == &CrateType::Rlib || ct == &CrateType::Staticlib)
+            {
+                cstore::NativeLibKind::StaticPacked {
+                    bundle,
+                    whole_archive,
+                    filename: find_native_static_library(
+                        name.as_str(),
+                        verbatim.unwrap_or(false),
+                        &sess.target_filesearch(PathKind::Native).search_path_dirs(),
+                        sess,
+                    )
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(Symbol::intern)
+                    .unwrap(),
+                }
+            } else {
+                kind
+            }
+        }
+        _ => kind,
     }
 }
 
@@ -351,21 +369,24 @@ impl<'tcx> Collector<'tcx> {
                 }
             }
 
-            let dll_imports = match kind {
-                Some(NativeLibKind::RawDylib) => {
+            let kind: cstore::NativeLibKind = kind.unwrap_or(NativeLibKind::Unspecified).into();
+            let kind = match kind {
+                cstore::NativeLibKind::RawDylib { .. } => {
                     if let Some((name, span)) = name && name.as_str().contains('\0') {
                         sess.emit_err(RawDylibNoNul { span });
                     }
-                    foreign_mod_items
-                        .iter()
-                        .map(|child_item| {
-                            self.build_dll_import(
-                                abi,
-                                import_name_type.map(|(import_name_type, _)| import_name_type),
-                                child_item,
-                            )
-                        })
-                        .collect()
+                    cstore::NativeLibKind::RawDylib {
+                        dll_imports: foreign_mod_items
+                            .iter()
+                            .map(|child_item| {
+                                self.build_dll_import(
+                                    abi,
+                                    import_name_type.map(|(import_name_type, _)| import_name_type),
+                                    child_item,
+                                )
+                            })
+                            .collect(),
+                    }
                 }
                 _ => {
                     for child_item in foreign_mod_items {
@@ -387,22 +408,25 @@ impl<'tcx> Collector<'tcx> {
                         }
                     }
 
-                    Vec::new()
+                    kind
                 }
             };
 
             let name = name.map(|(name, _)| name);
-            let kind = kind.unwrap_or(NativeLibKind::Unspecified);
-            let filename = find_bundled_library(name, verbatim, kind, sess);
+            // let error = format!(
+            //     "\n\n\n name: {:#?}\n wasm: {:#?}\n kind: {:#?}\n verb: {:#?}\n\n\n",
+            //     &name, &wasm_import_module, &kind, &verbatim
+            // );
+            // name.expect(&error);
+            // let name = name.unwrap_or(wasm_import_module.map(|(s, _)| s).expect(&error));
+            let name = if let Some(name) = name { name } else { wasm_import_module.unwrap().0 };
+            let kind = update_bundled_library(kind, name, verbatim, sess);
             self.libs.push(NativeLib {
+                kind: kind.into(),
                 name,
-                filename,
-                kind,
                 cfg,
                 foreign_module: Some(it.owner_id.to_def_id()),
-                wasm_import_module: wasm_import_module.map(|(name, _)| name),
                 verbatim,
-                dll_imports,
             });
         }
     }
@@ -420,8 +444,8 @@ impl<'tcx> Collector<'tcx> {
                 let any_duplicate = self
                     .libs
                     .iter()
-                    .filter_map(|lib| lib.name.as_ref())
-                    .any(|n| n.as_str() == lib.name);
+                    .filter(|lib| !matches!(lib.kind, cstore::NativeLibKind::WasmImportModule))
+                    .any(|n| n.name.as_str() == lib.name);
                 if new_name.is_empty() {
                     self.tcx.sess.emit_err(EmptyRenamingTarget { lib_name: &lib.name });
                 } else if !any_duplicate {
@@ -446,8 +470,8 @@ impl<'tcx> Collector<'tcx> {
             let mut existing = self
                 .libs
                 .drain_filter(|lib| {
-                    if let Some(lib_name) = lib.name {
-                        if lib_name.as_str() == passed_lib.name {
+                    if !matches!(lib.kind, cstore::NativeLibKind::WasmImportModule) {
+                        if lib.name.as_str() == passed_lib.name {
                             // FIXME: This whole logic is questionable, whether modifiers are
                             // involved or not, library reordering and kind overriding without
                             // explicit `:rename` in particular.
@@ -462,10 +486,10 @@ impl<'tcx> Collector<'tcx> {
                                 };
                             }
                             if passed_lib.kind != NativeLibKind::Unspecified {
-                                lib.kind = passed_lib.kind;
+                                lib.kind = passed_lib.kind.clone().into();
                             }
                             if let Some(new_name) = &passed_lib.new_name {
-                                lib.name = Some(Symbol::intern(new_name));
+                                lib.name = Symbol::intern(new_name);
                             }
                             lib.verbatim = passed_lib.verbatim;
                             return true;
@@ -475,21 +499,21 @@ impl<'tcx> Collector<'tcx> {
                 })
                 .collect::<Vec<_>>();
             if existing.is_empty() {
-                // Add if not found
                 let new_name: Option<&str> = passed_lib.new_name.as_deref();
-                let name = Some(Symbol::intern(new_name.unwrap_or(&passed_lib.name)));
-                let sess = self.tcx.sess;
-                let filename =
-                    find_bundled_library(name, passed_lib.verbatim, passed_lib.kind, sess);
-                self.libs.push(NativeLib {
+                let name = Symbol::intern(new_name.unwrap_or(&passed_lib.name));
+                let kind = update_bundled_library(
+                    passed_lib.kind.into(),
                     name,
-                    filename,
-                    kind: passed_lib.kind,
+                    passed_lib.verbatim,
+                    self.tcx.sess,
+                );
+
+                self.libs.push(NativeLib {
+                    kind,
+                    name,
                     cfg: None,
                     foreign_module: None,
-                    wasm_import_module: None,
                     verbatim: passed_lib.verbatim,
-                    dll_imports: Vec::new(),
                 });
             } else {
                 // Move all existing libraries with the same name to the

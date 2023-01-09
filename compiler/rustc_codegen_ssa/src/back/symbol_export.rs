@@ -14,6 +14,7 @@ use rustc_middle::ty::subst::{GenericArgKind, SubstsRef};
 use rustc_middle::ty::Instance;
 use rustc_middle::ty::{self, SymbolName, TyCtxt};
 use rustc_session::config::{CrateType, OomStrategy};
+use rustc_session::cstore::NativeLibKind;
 use rustc_target::spec::SanitizerSet;
 
 pub fn threshold(tcx: TyCtxt<'_>) -> SymbolExportLevel {
@@ -587,12 +588,14 @@ fn wasm_import_module_map(tcx: TyCtxt<'_>, cnum: CrateNum) -> FxHashMap<DefId, S
 
     let mut ret = FxHashMap::default();
     for (def_id, lib) in tcx.foreign_modules(cnum).iter() {
-        let module = def_id_to_native_lib.get(&def_id).and_then(|s| s.wasm_import_module);
-        let Some(module) = module else { continue };
-        ret.extend(lib.foreign_items.iter().map(|id| {
-            assert_eq!(id.krate, cnum);
-            (*id, module.to_string())
-        }));
+        let n_lib = def_id_to_native_lib.get(&def_id);
+        let Some(n_lib) = n_lib else { continue };
+        if let NativeLibKind::WasmImportModule {} = n_lib.kind {
+            ret.extend(lib.foreign_items.iter().map(|id| {
+                assert_eq!(id.krate, cnum);
+                (*id, n_lib.name.to_string())
+            }));
+        }
     }
 
     ret

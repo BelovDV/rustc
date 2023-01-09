@@ -3,7 +3,7 @@
 //! probably get a better home if someone can find one.
 
 use crate::search_paths::PathKind;
-use crate::utils::NativeLibKind;
+use crate::utils;
 use crate::Session;
 use rustc_ast as ast;
 use rustc_data_structures::sync::{self, MetadataRef, RwLock};
@@ -65,17 +65,91 @@ pub enum LinkagePreference {
     RequireStatic,
 }
 
+/// Extended utils::NativeLibKind.
+#[derive(Debug, Encodable, Decodable, HashStable_Generic, Clone, PartialEq)]
+pub enum NativeLibKind {
+    Static {
+        bundle: Option<bool>,
+        whole_archive: Option<bool>,
+    },
+    /// ???
+    StaticPacked {
+        // Always Some(true). Save information, was it explicitly defined.
+        bundle: Option<bool>,
+        whole_archive: Option<bool>,
+        filename: Symbol,
+    },
+    Dylib {
+        as_needed: Option<bool>,
+    },
+    RawDylib {
+        dll_imports: Vec<DllImport>,
+    },
+    Framework {
+        as_needed: Option<bool>,
+    },
+    LinkArg,
+    /// ???
+    WasmImportModule,
+    Unspecified,
+}
+
+impl From<utils::NativeLibKind> for NativeLibKind {
+    fn from(kind: utils::NativeLibKind) -> Self {
+        match kind {
+            utils::NativeLibKind::Static { bundle, whole_archive } => {
+                NativeLibKind::Static { bundle, whole_archive }
+            }
+            utils::NativeLibKind::Dylib { as_needed } => NativeLibKind::Dylib { as_needed },
+            utils::NativeLibKind::RawDylib => NativeLibKind::RawDylib { dll_imports: vec![] },
+            utils::NativeLibKind::Framework { as_needed } => NativeLibKind::Framework { as_needed },
+            utils::NativeLibKind::LinkArg => NativeLibKind::LinkArg,
+            utils::NativeLibKind::Unspecified => NativeLibKind::Unspecified,
+        }
+    }
+}
+
+impl NativeLibKind {
+    pub fn is_statically_included(&self) -> bool {
+        matches!(self, NativeLibKind::Static { .. } | NativeLibKind::StaticPacked { .. })
+    }
+
+    pub fn is_dllimport(&self) -> bool {
+        matches!(
+            self,
+            NativeLibKind::Dylib { .. }
+                | NativeLibKind::RawDylib { .. }
+                | NativeLibKind::Unspecified
+        )
+    }
+
+    pub fn has_modifiers(&self) -> bool {
+        match self {
+            NativeLibKind::Static { bundle, whole_archive } => {
+                bundle.is_some() || whole_archive.is_some()
+            }
+            NativeLibKind::StaticPacked { bundle, whole_archive, .. } => {
+                bundle.is_some() || whole_archive.is_some()
+            }
+            NativeLibKind::Dylib { as_needed } | NativeLibKind::Framework { as_needed } => {
+                as_needed.is_some()
+            }
+            NativeLibKind::RawDylib { .. }
+            | NativeLibKind::Unspecified
+            | NativeLibKind::WasmImportModule
+            | NativeLibKind::LinkArg => false,
+        }
+    }
+}
+
 #[derive(Debug, Encodable, Decodable, HashStable_Generic)]
 pub struct NativeLib {
     pub kind: NativeLibKind,
-    pub name: Option<Symbol>,
-    /// If packed_bundled_libs enabled, actual filename of library is stored.
-    pub filename: Option<Symbol>,
+    pub name: Symbol,
+    /// Incompatible with wasm import module.
     pub cfg: Option<ast::MetaItem>,
     pub foreign_module: Option<DefId>,
-    pub wasm_import_module: Option<Symbol>,
     pub verbatim: Option<bool>,
-    pub dll_imports: Vec<DllImport>,
 }
 
 impl NativeLib {
@@ -103,7 +177,7 @@ pub enum PeImportNameType {
     Undecorated,
 }
 
-#[derive(Clone, Debug, Encodable, Decodable, HashStable_Generic)]
+#[derive(Clone, Debug, Encodable, Decodable, HashStable_Generic, PartialEq)]
 pub struct DllImport {
     pub name: Symbol,
     pub import_name_type: Option<PeImportNameType>,
