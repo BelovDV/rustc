@@ -73,7 +73,9 @@ fn main() {
 
     println!("Running {cmd:?}");
 
+    std::env::set_var("CARGO_MAKEFLAGS", "");
     let output = cmd.output().unwrap();
+
     if !output.status.success() {
         println!("proc-macro-test-impl failed to build");
         println!("============ stdout ============");
