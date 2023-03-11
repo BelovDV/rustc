@@ -24,7 +24,7 @@ fn main() {
         },
         b"error: Cannot access jobserver: InvalidStream(100, 100)\n\n",
     );
-    // test_wrong_pipe(get_compiler(&args));
+    test_wrong_pipe(get_compiler(&args));
 }
 
 fn get_compiler(args: &Vec<String>) -> Command {
