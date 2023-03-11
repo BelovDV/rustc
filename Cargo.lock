@@ -2820,7 +2820,7 @@ dependencies = [
 [[package]]
 name = "jobserver"
 version = "0.1.26"
-source = "git+https://github.com/BelovDV/jobserver-rs?branch=new-extended-diagnostic#b6b7b6b634d853e5b5508608f8e2399b33d86eca"
+source = "git+https://github.com/BelovDV/jobserver-rs?branch=new-extended-diagnostic#6695a424a352e338e7edafbb4171b2002afb1a7b"
 dependencies = [
  "libc",
 ]
