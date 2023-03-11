@@ -4,7 +4,5 @@ include ../../run-make-fulldeps/tools.mk
 
 all:
 	$(RUSTC) test.rs
-	touch $(TMPDIR)/empty
-	echo a > $(TMPDIR)/empty
 	$(TMPDIR)/test $(RUSTC_ORIGINAL) $(TMPDIR) test.rs
 

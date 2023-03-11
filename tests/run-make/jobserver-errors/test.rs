@@ -1,45 +1,59 @@
-use std::process::Command;
-use std::fs::File;
-// use std::io::Read as _;
-use std::os::fd::AsRawFd as _;
-use std::path::Path;
+#![feature(rustc_private)]
 
+use std::fs::File;
+use std::os::fd::AsRawFd as _;
+use std::os::unix::process::CommandExt as _;
+use std::process::Command;
+
+extern crate libc;
 
 fn main() {
     let args: Vec<_> = std::env::args().collect();
-    let compiler = &args[1];
-    let out_dir = &args[2];
-    let code = &args[3];
-    dbg!(compiler, out_dir, code);
 
-    let f_empty = File::open(Path::new(out_dir).join("empty")).unwrap();
-    let fd_empty = f_empty.as_raw_fd() as i32;
-
-    test_wrong_var(get_compiler(compiler, out_dir, code));
-    test_no_pipe(get_compiler(compiler, out_dir, code));
-    test_wrong_pipe(get_compiler(compiler, out_dir, code), fd_empty);
+    test(
+        &args,
+        |cmd| {
+            cmd.env("MAKEFLAGS", "--jobserver-auth=");
+        },
+        b"error: Cannot access jobserver: ParseEnvVar(\"\")\n\n",
+    );
+    test(
+        &args,
+        |cmd| {
+            cmd.env("MAKEFLAGS", "--jobserver-auth=100,100");
+        },
+        b"error: Cannot access jobserver: InvalidStream(100, 100)\n\n",
+    );
+    // test_wrong_pipe(get_compiler(&args));
 }
 
-fn get_compiler(compiler: &str, out_dir: &str, code: &str) -> Command {
-    let mut cmd = Command::new(compiler);
-    cmd.args(["--out-dir", out_dir]);
-    cmd.arg(code);
+fn get_compiler(args: &Vec<String>) -> Command {
+    let mut cmd = Command::new(&args[1]);
+    cmd.args(["--out-dir", &args[2]]);
+    cmd.arg(&args[3]);
     cmd
 }
 
-fn test_wrong_var(mut cmd: Command) {
-    cmd.env("MAKEFLAGS", "--jobserver-auth=");
-    let output = cmd.output().unwrap();
-    assert_eq!(output.stderr, b"error: Cannot access jobserver: ParseEnvVar(\"\")\n\n");
+fn test(args: &Vec<String>, f: fn(&mut Command), err: &[u8]) {
+    let mut cmd = get_compiler(args);
+    f(&mut cmd);
+    assert!(cmd.output().unwrap().stderr == err);
 }
 
-fn test_no_pipe(mut cmd: Command) {
-    cmd.env("MAKEFLAGS", "--jobserver-auth=100,100");
-    let output = cmd.output().unwrap();
-    assert_eq!(output.stderr, b"error: Cannot access jobserver: InvalidStream(100, 100)\n\n");
-}
+fn test_wrong_pipe(mut cmd: Command) {
+    let file = File::open("/dev/null").unwrap();
+    let fd = file.as_raw_fd();
+    unsafe {
+        cmd.pre_exec(move || {
+            libc::fcntl(fd, libc::F_SETFD, 0);
+            Ok(())
+        });
+    }
 
-fn test_wrong_pipe(mut _cmd: Command, _fd_empty: i32) {
+    cmd.env("MAKEFLAGS", format!("--jobserver-auth={},{}", fd, fd));
+
+    dbg!(std::str::from_utf8(&cmd.output().unwrap().stderr).unwrap());
+
     // let f_out = File::open("/dev/null").unwrap();
     // let fd_out = f_out.as_raw_fd() as i32;
     // cmd.env("MAKEFLAGS", format!("--jobserver-auth={},{}", fd_empty, fd_out));
@@ -47,4 +61,9 @@ fn test_wrong_pipe(mut _cmd: Command, _fd_empty: i32) {
     // let output = cmd.output().unwrap();
     // dbg!(std::str::from_utf8(&output.stderr).unwrap());
     // assert_eq!(output.stderr, b"error: Cannot access jobserver: InvalidStream(100, 100)\n\n");
+    assert!(
+        cmd.output().unwrap().stderr
+            == b"error: failed to acquire jobserver token: early EOF on jobserver pipe\
+            \n\nerror: aborting due to previous error\n\n"
+    );
 }
