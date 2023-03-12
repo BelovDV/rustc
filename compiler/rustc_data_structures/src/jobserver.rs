@@ -2,6 +2,7 @@ pub use jobserver_crate::Client;
 pub use jobserver_crate::ErrFromEnv;
 
 use std::sync::LazyLock;
+use std::sync::Mutex;
 
 // We can only call `from_env` once per process
 
@@ -20,25 +21,28 @@ use std::sync::LazyLock;
 // Also note that we stick this in a global because there could be
 // multiple rustc instances in this process, and the jobserver is
 // per-process.
-static GLOBAL_CLIENT: LazyLock<(Client, Option<ErrFromEnv>)> = LazyLock::new(|| unsafe {
-    match Client::from_env_ext() {
-        Ok(Some(c)) => (c, None),
-        Ok(None) => (Client::new(32).expect("failed to create jobserver"), None),
-        Err(e) => (Client::new(1).unwrap(), Some(e)),
+static GLOBAL_CLIENT: LazyLock<Mutex<(Client, Option<ErrFromEnv>)>> = LazyLock::new(|| unsafe {
+    match Client::from_env() {
+        Ok(c) => Mutex::new((c, None)),
+        Err(ErrFromEnv::IsNotConfigured) => {
+            Mutex::new((Client::new(32).expect("failed to create jobserver"), None))
+        }
+        Err(e) => Mutex::new((Client::new(1).unwrap(), Some(e))),
     }
 });
 
 pub fn client() -> Result<Client, ErrFromEnv> {
-    match GLOBAL_CLIENT.clone().1 {
+    let err = std::mem::replace(&mut GLOBAL_CLIENT.lock().unwrap().1, None);
+    match err {
         Some(e) => Err(e),
-        None => Ok(GLOBAL_CLIENT.0.clone()),
+        None => Ok(GLOBAL_CLIENT.lock().unwrap().0.clone()),
     }
 }
 
 pub fn acquire_thread() {
-    GLOBAL_CLIENT.0.acquire_raw().ok();
+    GLOBAL_CLIENT.lock().unwrap().0.acquire_raw().ok();
 }
 
 pub fn release_thread() {
-    GLOBAL_CLIENT.0.release_raw().ok();
+    GLOBAL_CLIENT.lock().unwrap().0.release_raw().ok();
 }

@@ -15,14 +15,14 @@ fn main() {
         |cmd| {
             cmd.env("MAKEFLAGS", "--jobserver-auth=");
         },
-        b"error: Cannot access jobserver: ParseEnvVar(\"\")\n\n",
+        b"error: Cannot access jobserver: PlatformSpecific { err: ParseEnvVar, env: \"MAKEFLAGS\", var: \"--jobserver-auth=\" }\n\n",
     );
     test(
         &args,
         |cmd| {
             cmd.env("MAKEFLAGS", "--jobserver-auth=100,100");
         },
-        b"error: Cannot access jobserver: InvalidStream(100, 100)\n\n",
+        b"error: Cannot access jobserver: PlatformSpecific { err: InvalidDescriptor(100, 100), env: \"MAKEFLAGS\", var: \"--jobserver-auth=100,100\" }\n\n",
     );
     test_wrong_pipe(get_compiler(&args));
 }
@@ -37,6 +37,7 @@ fn get_compiler(args: &Vec<String>) -> Command {
 fn test(args: &Vec<String>, f: fn(&mut Command), err: &[u8]) {
     let mut cmd = get_compiler(args);
     f(&mut cmd);
+    dbg!(std::str::from_utf8(&cmd.output().unwrap().stderr).unwrap());
     assert!(cmd.output().unwrap().stderr == err);
 }
 
