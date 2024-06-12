@@ -1470,7 +1470,7 @@ pub fn build_session(
     let sess = Session {
         target: target_cfg,
         host,
-        opts: sopts,
+        opts: sopts.clone(),
         host_tlib_path,
         target_tlib_path,
         parse_sess,
@@ -1491,7 +1491,9 @@ pub fn build_session(
         code_stats: Default::default(),
         optimization_fuel,
         print_fuel,
-        jobserver: jobserver::client(),
+        jobserver: jobserver::client().unwrap_or_else(|e| {
+            early_error(sopts.error_format, &format!("Cannot access jobserver: {:?}", &e))
+        }),
         driver_lint_caps,
         ctfe_backtrace,
         miri_unleashed_features: Lock::new(Default::default()),

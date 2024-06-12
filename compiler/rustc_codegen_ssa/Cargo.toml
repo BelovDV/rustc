@@ -13,7 +13,7 @@ cc = "1.0.69"
 itertools = "0.10.1"
 tracing = "0.1"
 libc = "0.2.50"
-jobserver = "0.1.22"
+jobserver = { git = "https://github.com/BelovDV/jobserver-rs", branch = "new-extended-diagnostic", package = "jobserver" }
 tempfile = "3.2"
 thorin-dwp = "0.4"
 pathdiff = "0.2.0"

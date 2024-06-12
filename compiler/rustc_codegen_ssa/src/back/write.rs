@@ -1449,11 +1449,10 @@ fn start_executing_work<B: ExtraBackendMethods>(
                                 running += 1;
                             }
                         }
+
                         Err(e) => {
                             let msg = &format!("failed to acquire jobserver token: {}", e);
                             shared_emitter.fatal(msg);
-                            // Exit the coordinator thread
-                            panic!("{}", msg)
                         }
                     }
                 }
